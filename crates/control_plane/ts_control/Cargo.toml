@@ -29,7 +29,6 @@ ts_derp.workspace = true
 # Unconditionally required dependencies.
 bytes.workspace = true
 chrono = { workspace = true, features = ["clock", "serde"] }
-gethostname.workspace = true
 ipnet = { workspace = true, features = ["serde"] }
 lazy_static.workspace = true
 pin-project-lite.workspace = true
@@ -42,6 +41,9 @@ url = { workspace = true, features = ["serde", "std"] }
 zerocopy.workspace = true
 futures-util = { workspace = true }
 tokio = { workspace = true }
+
+[target.'cfg(not(target_os = "hermit"))'.dependencies]
+gethostname.workspace = true
 
 [features]
 # Allow derp connections to be made without verifying TLS certs. Only for use in tests.

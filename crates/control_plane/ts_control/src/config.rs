@@ -56,11 +56,19 @@ impl Debug for Config {
     }
 }
 
+/// The OS hostname, if the platform has one. Hermit (a unikernel) has no hostname.
+fn os_hostname() -> Option<String> {
+    #[cfg(not(target_os = "hermit"))]
+    return gethostname::gethostname().into_string().ok();
+    #[cfg(target_os = "hermit")]
+    return None;
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
             server_url: DEFAULT_CONTROL_SERVER.clone(),
-            hostname: gethostname::gethostname().into_string().ok(),
+            hostname: os_hostname(),
             client_name: None,
             tags: Default::default(),
             ephemeral: false,

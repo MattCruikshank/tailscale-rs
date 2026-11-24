@@ -7,7 +7,6 @@ use tokio_rustls::{
     client::TlsStream,
     rustls,
     rustls::{
-        ClientConfig,
         client::danger::ServerCertVerified,
         pki_types::{CertificateDer, UnixTime},
     },
@@ -26,7 +25,7 @@ where
 {
     tracing::warn!(server_name = %server_name.to_str(), "connecting insecure TLS");
 
-    let rustls_config = ClientConfig::builder()
+    let rustls_config = crate::client_config_builder()?
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(InsecureCertVerifier))
         .with_no_client_auth();
@@ -72,7 +71,7 @@ impl ServerCertVerifier for InsecureCertVerifier {
     }
 
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        rustls::crypto::aws_lc_rs::default_provider()
+        crate::crypto_provider()
             .signature_verification_algorithms
             .supported_schemes()
     }

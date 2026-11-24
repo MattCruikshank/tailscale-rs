@@ -5,7 +5,7 @@ use std::sync::{Arc, LazyLock};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_rustls::{
     TlsConnector,
-    rustls::{ClientConfig, RootCertStore},
+    rustls::{ClientConfig, RootCertStore, crypto::CryptoProvider},
 };
 pub use tokio_rustls::{client::TlsStream, rustls::pki_types::ServerName};
 use url::Url;
@@ -21,6 +21,22 @@ static ROOT_CERT_STORE: LazyLock<Arc<RootCertStore>> = LazyLock::new(|| {
         roots: webpki_roots::TLS_SERVER_ROOTS.into(),
     })
 });
+
+/// The rustls crypto provider: aws-lc-rs normally, pure-Rust RustCrypto on Hermit.
+pub(crate) fn crypto_provider() -> Arc<CryptoProvider> {
+    #[cfg(not(target_os = "hermit"))]
+    return Arc::new(tokio_rustls::rustls::crypto::aws_lc_rs::default_provider());
+    #[cfg(target_os = "hermit")]
+    return Arc::new(rustls_rustcrypto::provider());
+}
+
+fn client_config_builder()
+-> std::io::Result<tokio_rustls::rustls::ConfigBuilder<ClientConfig, tokio_rustls::rustls::WantsVerifier>>
+{
+    ClientConfig::builder_with_provider(crypto_provider())
+        .with_safe_default_protocol_versions()
+        .map_err(std::io::Error::other)
+}
 
 /// Establishes a TLS stream with a server over an existing connection.
 ///
@@ -45,7 +61,7 @@ where
     Io: AsyncRead + AsyncWrite + Unpin,
 {
     // TODO(npry): custom tls cert verifier to support commonname overrides and self-signed certs
-    let mut rustls_config = ClientConfig::builder()
+    let mut rustls_config = client_config_builder()?
         .with_root_certificates(ROOT_CERT_STORE.clone())
         .with_no_client_auth();
 
