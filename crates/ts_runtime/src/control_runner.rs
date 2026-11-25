@@ -108,16 +108,30 @@ impl kameo::Actor for ControlRunner {
     type Error = ControlRunnerError;
 
     async fn on_start(params: Params, slf: ActorRef<Self>) -> Result<Self, Self::Error> {
-        let client = params
-            .env
-            .ask::<DialerActor, _>(
-                None,
-                DialNext {
-                    url: params.config.server_url.clone(),
-                },
-                true,
-            )
-            .await?;
+        // Retry the initial control-plane dial with backoff: a transient failure (e.g. a DNS
+        // lookup that times out right after boot) used to fail on_start, and an actor that fails
+        // to start is never restarted, so the device would never register.
+        let mut retry_in = std::time::Duration::from_secs(1);
+        let client = loop {
+            let dialed = params
+                .env
+                .ask::<DialerActor, _>(
+                    None,
+                    DialNext {
+                        url: params.config.server_url.clone(),
+                    },
+                    true,
+                )
+                .await;
+            match dialed {
+                Ok(client) => break client,
+                Err(e) => {
+                    tracing::warn!(error = %e, ?retry_in, "dialing control server failed; retrying");
+                    tokio::time::sleep(retry_in).await;
+                    retry_in = (retry_in * 2).min(std::time::Duration::from_secs(30));
+                }
+            }
+        };
 
         Task::supervise_with(&slf, {
             let aref = slf.downgrade();
