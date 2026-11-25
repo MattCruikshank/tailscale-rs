@@ -328,7 +328,10 @@ impl Message<Arc<netmon::State>> for DirectActor {
             self.reachable.insert(addr, ());
         }
 
-        self.publish_endpoints().await.unwrap()
+        // The bus may be gone during shutdown; don't panic (aborts the OS on Hermit).
+        if let Err(e) = self.publish_endpoints().await {
+            tracing::debug!(error = %e, "couldn't publish endpoints");
+        }
     }
 }
 
@@ -337,7 +340,10 @@ impl Message<StunAddress> for DirectActor {
 
     async fn handle(&mut self, msg: StunAddress, _ctx: &mut Context<Self, Self::Reply>) {
         self.stun_addr = Some(msg.addr);
-        self.publish_endpoints().await.unwrap()
+        // The bus may be gone during shutdown; don't panic (aborts the OS on Hermit).
+        if let Err(e) = self.publish_endpoints().await {
+            tracing::debug!(error = %e, "couldn't publish endpoints");
+        }
     }
 }
 

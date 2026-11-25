@@ -101,10 +101,11 @@ impl kameo::Actor for PathDiscoverer {
 
 impl PathDiscoverer {
     async fn publish_best_paths(&self) {
-        self.env
-            .publish(BestPaths(Arc::new(self.best_paths.clone())))
-            .await
-            .unwrap();
+        // The bus may already be gone while the runtime shuts down (this also runs in
+        // `on_stop`); that's not worth a panic (panics abort the whole OS on Hermit).
+        if let Err(e) = self.env.publish(BestPaths(Arc::new(self.best_paths.clone()))).await {
+            tracing::debug!(error = %e, "couldn't publish best paths");
+        }
     }
 }
 

@@ -199,7 +199,10 @@ impl Message<StreamMessage<DiscoInternal, (), ()>> for DataplaneActor {
             });
 
             if let Some(pkt) = pkt {
-                self.env.publish_noretain(pkt).await.unwrap();
+                // The bus may be gone during shutdown; don't panic (aborts the OS on Hermit).
+                if let Err(e) = self.env.publish_noretain(pkt).await {
+                    tracing::debug!(error = %e, "couldn't publish disco packet");
+                }
             }
         }
     }
@@ -254,7 +257,10 @@ impl Message<StreamMessage<ActivePeers, (), ()>> for DataplaneActor {
 
         tracing::debug!(active_peers = ?peers, "new active_peers");
 
-        self.env.publish(peers).await.unwrap();
+        // The bus may be gone during shutdown; don't panic (aborts the OS on Hermit).
+        if let Err(e) = self.env.publish(peers).await {
+            tracing::debug!(error = %e, "couldn't publish active peers");
+        }
     }
 }
 
