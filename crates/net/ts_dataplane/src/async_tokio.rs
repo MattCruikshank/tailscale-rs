@@ -374,7 +374,11 @@ async fn write_to_overlay(slf: &CoreState, packets: HashMap<OverlayTransportId, 
     for (id, packets) in packets {
         if let Some(queue) = slf.overlay_transports.get(&id) {
             tracing::trace!(overlay_id = ?id, n_packets = packets.len(), "overlay packets");
-            queue.send(packets).unwrap();
+            // The transport may be gone while the runtime shuts down: drop its packets rather
+            // than panic (panics abort the whole OS on Hermit).
+            if queue.send(packets).is_err() {
+                tracing::debug!(overlay_id = ?id, "overlay transport gone; dropping packets");
+            }
         }
     }
 }
@@ -384,7 +388,10 @@ async fn write_to_underlay(slf: &CoreState, packets: underlay_router::outbound::
         tracing::trace!(underlay_id = ?tid, ?endpoint, n_packets = packets.len(), "underlay data packets");
 
         if let Some(queue) = slf.underlay_transports.get(&tid) {
-            queue.send((endpoint, packets)).unwrap();
+            // As above: a transport that's gone during shutdown isn't worth a panic.
+            if queue.send((endpoint, packets)).is_err() {
+                tracing::debug!(underlay_id = ?tid, "underlay transport gone; dropping packets");
+            }
         }
     }
 }
