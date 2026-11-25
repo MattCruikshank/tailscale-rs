@@ -167,9 +167,16 @@ pub async fn dial_server(server: &ServerConnInfo) -> Result<Option<TcpStream>, E
     let mut last_error = None;
 
     while let Some(task) = js.join_next().await {
-        // A JoinError is either a cancellation (not the case by inspection) or a task panic.
-        // Hence, this unwrap just forwards the inner panic, which is the behavior we want here.
-        match task.unwrap() {
+        // A JoinError is either a cancellation or a task panic. Cancellation does happen: the
+        // runtime cancels all tasks when it shuts down, and unwrapping then panicked during
+        // shutdown (fatal where panics abort, e.g. Hermit). Treat a cancelled dial as "no
+        // stream"; forward real panics unchanged.
+        let task = match task {
+            Ok(result) => result,
+            Err(e) if e.is_cancelled() => continue,
+            Err(e) => std::panic::resume_unwind(e.into_panic()),
+        };
+        match task {
             Ok(Some(stream)) => return Ok(Some(stream)),
             Ok(None) => {
                 continue;
