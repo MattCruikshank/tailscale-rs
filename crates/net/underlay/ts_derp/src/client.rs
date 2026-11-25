@@ -214,7 +214,14 @@ impl Client<DefaultIo> {
         region: impl IntoIterator<Item = &'c ServerConnInfo>,
         node_keypair: &NodeKeyPair,
     ) -> Result<Self, Error> {
-        let conn = connect(region).await?.unwrap();
+        // `None`: no server address could be dialed (e.g. no usable addresses, or the dial
+        // tasks were cancelled because the runtime is shutting down). Not a panic.
+        let conn = connect(region).await?.ok_or_else(|| {
+            Error::IoFailure(std::io::Error::new(
+                std::io::ErrorKind::NotConnected,
+                "no DERP server address could be dialed",
+            ))
+        })?;
 
         Client::handshake(conn, node_keypair).await
     }
