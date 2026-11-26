@@ -49,9 +49,17 @@ impl Message<IncomingDiscoMsg> for Disco {
 
                 let cmm = pkt.as_msg::<ts_disco_protocol::CallMeMaybe>().unwrap();
 
-                for ep in &cmm.endpoints {
-                    let addr = ep.socket_addr();
-                    let ep = DynEndpoint::udp(ep.socket_addr());
+                // Each endpoint, and the same port at the extra candidate hosts.
+                let addrs: Vec<_> = cmm
+                    .endpoints
+                    .iter()
+                    .flat_map(|ep| {
+                        let a = ep.socket_addr();
+                        std::iter::once(a).chain(crate::candidates::aliases(a))
+                    })
+                    .collect();
+                for addr in addrs {
+                    let ep = DynEndpoint::udp(addr);
 
                     let tx_id = rand::random();
 

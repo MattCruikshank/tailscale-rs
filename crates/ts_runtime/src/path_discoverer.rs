@@ -326,10 +326,18 @@ impl PeerPd {
             tracing::trace!(?ep, sent_eps = ?self.this_node_endpoints, "sent callmemaybe");
         }
 
-        // Send pings for all non-disco-coordinator endpoints.
-        let mut eps = self.seen_peer_endpoints.keys().collect::<HashSet<_>>();
-        eps.extend(&self.endpoints_cmm);
-        eps.extend(&self.endpoints_ctrl);
+        // Send pings for all non-disco-coordinator endpoints (and the same ports at the extra
+        // candidate hosts).
+        let mut eps = self.seen_peer_endpoints.keys().cloned().collect::<HashSet<_>>();
+        eps.extend(self.endpoints_cmm.iter().cloned());
+        eps.extend(self.endpoints_ctrl.iter().cloned());
+        let aliases: Vec<DynEndpoint> = eps
+            .iter()
+            .filter_map(|ep| ep.as_udp())
+            .flat_map(crate::candidates::aliases)
+            .map(DynEndpoint::udp)
+            .collect();
+        eps.extend(aliases);
 
         for ep in eps {
             if ep.is_disco_coordinator() {
