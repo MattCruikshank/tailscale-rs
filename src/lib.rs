@@ -129,7 +129,8 @@ use std::{
 #[doc(inline)]
 pub use config::Config;
 /// Extra hosts to try at peers' UDP ports, for direct paths (e.g. QEMU's `10.0.2.2`: the host).
-/// See `ts_runtime::candidates`. use ts_runtime::candidates::set_extra_candidate_hosts;
+/// See `ts_runtime::candidates`.
+pub use ts_runtime::candidates::set_extra_candidate_hosts;
 #[doc(inline)]
 pub use error::{Error, InternalErrorKind};
 #[doc(inline)]
