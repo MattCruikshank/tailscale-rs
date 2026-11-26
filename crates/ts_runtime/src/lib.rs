@@ -13,7 +13,6 @@ use crate::{
 };
 
 /// Control runner.
-pub mod candidates;
 pub mod control_runner;
 mod dataplane;
 mod derp_latency;
