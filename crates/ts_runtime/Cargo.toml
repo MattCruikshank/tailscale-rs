@@ -46,6 +46,9 @@ yoke.workspace = true
 url.workspace = true
 rand.workspace = true
 bytes.workspace = true
+serde_json.workspace = true
+ts_capabilityversion.workspace = true
+ts_http_util.workspace = true
 itertools.workspace = true
 zerocopy.workspace = true
 

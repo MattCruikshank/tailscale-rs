@@ -179,6 +179,7 @@ forward!(
     control_runner::Ipv6,
     control_runner::SelfNode,
     control_runner::AuthUrl,
+    control_runner::SetDns,
 );
 forward!(
     PeerTracker,

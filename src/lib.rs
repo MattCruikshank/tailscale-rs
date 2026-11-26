@@ -289,6 +289,17 @@ impl Device {
     }
 
     /// Get our node info.
+    /// Ask the control server to publish a DNS record for this node: for ACME's DNS-01 challenge
+    /// (a `*.ts.net` HTTPS certificate), `name` is `_acme-challenge.<this node's fqdn>` and
+    /// `record_type` is `TXT`. Needs HTTPS certificates enabled for the tailnet.
+    pub async fn set_dns(&self, name: &str, record_type: &str, value: &str) -> Result<(), String> {
+        self.runtime
+            .ask(ts_runtime::SetDns { name: name.into(), record_type: record_type.into(), value: value.into() })
+            .await
+            // A handler error (the control server said no) is in kameo's error: keep its text.
+            .map_err(|e| format!("{e:?}"))
+    }
+
     pub async fn self_node(&self) -> Result<NodeInfo, Error> {
         self.runtime
             .ask(ts_runtime::SelfNode)
