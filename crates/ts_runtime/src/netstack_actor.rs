@@ -43,6 +43,7 @@ impl kameo::Actor for NetstackActor {
             },
         ) = netstack::piped(config);
         let channel = netstack.command_channel();
+        netstack::set_loop_counter(&ts_dataplane::timing::NETSTACK_LOOPS);
 
         Task::spawn_link(&slf, async move {
             netstack.run_tokio().await;
@@ -51,6 +52,7 @@ impl kameo::Actor for NetstackActor {
 
         Task::spawn_link(&slf, async move {
             while let Some(buf) = netstack_down_rx.recv_async().await {
+                ts_dataplane::timing::count(&ts_dataplane::timing::NETSTACK_DOWNLINK, 1);
                 if netstack_up.send((id, vec![buf.to_vec().into()])).is_err() {
                     break;
                 }
@@ -70,6 +72,7 @@ impl kameo::Actor for NetstackActor {
                 for buf in bufs {
                     let buf: PacketMut = buf;
                     netstack_down_tx.send_async(buf.as_ref()).await;
+                    ts_dataplane::timing::count(&ts_dataplane::timing::NETSTACK_UPLINK, 1);
                 }
             }
 

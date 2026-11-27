@@ -22,15 +22,26 @@ pub static UNDERLAY_OUT: AtomicU64 = AtomicU64::new(0);
 pub static OVERLAY_IN: AtomicU64 = AtomicU64::new(0);
 /// Packets the data plane handed to the overlay.
 pub static OVERLAY_OUT: AtomicU64 = AtomicU64::new(0);
+/// Packets the uplink task moved from the data plane into the netstack's pipe (counted by the
+/// runtime's netstack actor).
+pub static NETSTACK_UPLINK: AtomicU64 = AtomicU64::new(0);
+/// Packets the downlink task moved from the netstack's pipe to the data plane.
+pub static NETSTACK_DOWNLINK: AtomicU64 = AtomicU64::new(0);
+/// Iterations of the netstack's run loop (it counts them once the runtime points it here).
+pub static NETSTACK_LOOPS: AtomicU64 = AtomicU64::new(0);
 
-const COUNTERS: [(&str, &AtomicU64); 6] = [
+const COUNTERS: [(&str, &AtomicU64); N] = [
     ("udp rx", &UDP_RX),
     ("udp tx", &UDP_TX),
     ("data plane in from the underlay", &UNDERLAY_IN),
     ("data plane out to the underlay", &UNDERLAY_OUT),
     ("data plane in from the overlay", &OVERLAY_IN),
     ("data plane out to the overlay", &OVERLAY_OUT),
+    ("uplink into the netstack", &NETSTACK_UPLINK),
+    ("downlink out of the netstack", &NETSTACK_DOWNLINK),
+    ("netstack loop iterations", &NETSTACK_LOOPS),
 ];
+const N: usize = 9;
 
 /// A step, lock wait or lock hold longer than this is reported.
 pub const SLOW: Duration = Duration::from_millis(200);
@@ -72,10 +83,10 @@ const HISTORY: usize = 8;
 pub async fn watchdog() -> core::convert::Infallible {
     let snapshot = || COUNTERS.map(|(_, c)| c.load(Ordering::Relaxed));
     let mut history = std::collections::VecDeque::from([snapshot()]);
-    let mut last_change = [Instant::now(); 6];
+    let mut last_change = [Instant::now(); N];
     // Per counter: how busy it was in the 2 s before its last change, and all counters then.
-    let mut busy_before = [0u64; 6];
-    let mut at_last_change = [snapshot(); 6];
+    let mut busy_before = [0u64; N];
+    let mut at_last_change = [snapshot(); N];
     let mut interval = tokio::time::interval(TICK);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut last_tick = Instant::now();

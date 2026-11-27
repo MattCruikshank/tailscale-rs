@@ -26,7 +26,7 @@ mod std_clock;
 mod tun_rs_device;
 
 pub use pipe::{WakingPipe, WakingPipeDev, WakingPipeReceiver, WakingPipeSender};
-pub use run::{run, run_blocking};
+pub use run::{run, run_blocking, set_loop_counter};
 #[cfg(feature = "tun")]
 pub use tun_rs_device::{TunRsDevice, TunRsDeviceAsync};
 

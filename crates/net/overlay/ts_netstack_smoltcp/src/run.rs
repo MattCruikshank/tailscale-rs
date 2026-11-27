@@ -47,6 +47,22 @@ pub fn run_blocking(
     }
 }
 
+/// Counted once per iteration of [`run`]'s loop, if set ([`set_loop_counter`]; null: unset).
+static LOOP_COUNTER: core::sync::atomic::AtomicPtr<core::sync::atomic::AtomicU64> =
+    core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
+
+/// Count every iteration of the async run loop in `counter` (for timing the data path from
+/// outside: a loop that stops while packets wait means the netstack task isn't running). Only
+/// the first call has an effect.
+pub fn set_loop_counter(counter: &'static core::sync::atomic::AtomicU64) {
+    let _ = LOOP_COUNTER.compare_exchange(
+        core::ptr::null_mut(),
+        core::ptr::from_ref(counter).cast_mut(),
+        core::sync::atomic::Ordering::AcqRel,
+        core::sync::atomic::Ordering::Relaxed,
+    );
+}
+
 /// Run the netstack indefinitely.
 #[tracing::instrument(skip_all)]
 pub async fn run(
@@ -58,6 +74,10 @@ pub async fn run(
     use futures_util::FutureExt;
 
     loop {
+        // SAFETY: a non-null pointer came from a `&'static AtomicU64` (`set_loop_counter`).
+        if let Some(counter) = unsafe { LOOP_COUNTER.load(core::sync::atomic::Ordering::Acquire).as_ref() } {
+            counter.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        }
         let now = now();
 
         let delay = netstack.poll_delay(now);
