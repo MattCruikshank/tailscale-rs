@@ -1,6 +1,6 @@
 //! Cheap timing of the data path, cheap enough to leave on: counters at the hand-offs, a
 //! warning for slow steps and long lock waits, and a [`watchdog`] that notices when one hand-off
-//! goes quiet while the others keep moving.
+//! goes quiet while the others keep moving (reported when it resumes).
 //!
 //! Written to find tunnel-wide stalls of a few seconds under load (METAL ISSUE-00049): in a
 //! real stall, *something* keeps moving — TCP retransmissions going out, or the peer's packets
@@ -51,23 +51,31 @@ pub fn report_slow(what: &str, took: Duration) {
 
 /// Watchdog tick.
 const TICK: Duration = Duration::from_millis(250);
-/// A counter quiet this long (while another moves) is reported.
-const QUIET: Duration = Duration::from_secs(1);
-/// ... if it had moved at least this many packets in the 2 s before it went quiet.
-const BUSY_PACKETS: u64 = 20;
+/// A gap shorter than this isn't a stall.
+const QUIET_MIN: Duration = Duration::from_secs(1);
+/// ... and one longer than this is a pause in traffic, not a stall.
+const QUIET_MAX: Duration = Duration::from_secs(30);
+/// Busy before the gap: at least this many packets in the 2 s before it (~100/s).
+const BUSY_PACKETS: u64 = 200;
+/// During the gap, another counter moved at least this many packets (TCP retransmissions of a
+/// handful of connections; keepalives and disco alone don't reach it).
+const OTHERS_PACKETS: u64 = 8;
 /// Ticks of history kept (2 s).
 const HISTORY: usize = 8;
 
-/// Watches the counters forever (spawn it once). Every 250 ms: a counter that moved at least
-/// 20 packets in the 2 s before it went quiet, has been quiet for over 1 s, while another
-/// counter moved in the last tick, is reported once — and again when it resumes, with how long
-/// it was quiet. A late tick (the runtime didn't run it for over 500 ms) is reported too.
+/// Watches the counters forever (spawn it once). Reports a **stall** when a counter resumes:
+/// it had moved at least 200 packets in the 2 s before it went quiet, it was quiet for 1–30 s,
+/// and meanwhile another counter moved at least 8 packets — naming which ones, and how many.
+/// That's the shape of a tunnel-wide stall under load (something keeps trying while one
+/// hand-off is stuck); a pause in traffic, a burst ending, or keepalives aren't reported. A late
+/// tick (the runtime didn't run the watchdog for over 500 ms) is reported too.
 pub async fn watchdog() -> core::convert::Infallible {
     let snapshot = || COUNTERS.map(|(_, c)| c.load(Ordering::Relaxed));
     let mut history = std::collections::VecDeque::from([snapshot()]);
     let mut last_change = [Instant::now(); 6];
+    // Per counter: how busy it was in the 2 s before its last change, and all counters then.
     let mut busy_before = [0u64; 6];
-    let mut reported = [false; 6];
+    let mut at_last_change = [snapshot(); 6];
     let mut interval = tokio::time::interval(TICK);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut last_tick = Instant::now();
@@ -85,35 +93,27 @@ pub async fn watchdog() -> core::convert::Infallible {
         let previous = *history.back().unwrap_or(&current);
         let oldest = *history.front().unwrap_or(&current);
         for i in 0..COUNTERS.len() {
-            if current[i] != previous[i] {
-                if reported[i] {
-                    tracing::warn!(
-                        "data path: {} resumed after {:.1?} quiet",
-                        COUNTERS[i].0,
-                        now.duration_since(last_change[i])
-                    );
-                    reported[i] = false;
-                }
-                last_change[i] = now;
-                busy_before[i] = current[i] - oldest[i];
+            if current[i] == previous[i] {
+                continue;
             }
-        }
-        let moving: Vec<&str> = (0..COUNTERS.len())
-            .filter(|&i| current[i] != previous[i])
-            .map(|i| COUNTERS[i].0)
-            .collect();
-        for i in 0..COUNTERS.len() {
             let quiet = now.duration_since(last_change[i]);
-            if !reported[i] && quiet > QUIET && busy_before[i] >= BUSY_PACKETS && !moving.is_empty()
-            {
-                tracing::warn!(
-                    "data path: no packets {} for {quiet:.1?} (after {} in the 2 s before) while {} kept moving",
-                    COUNTERS[i].0,
-                    busy_before[i],
-                    moving.join(", ")
-                );
-                reported[i] = true;
+            if quiet > QUIET_MIN && quiet <= QUIET_MAX && busy_before[i] >= BUSY_PACKETS {
+                let others: Vec<String> = (0..COUNTERS.len())
+                    .filter(|&j| j != i && previous[j] - at_last_change[i][j] >= OTHERS_PACKETS)
+                    .map(|j| format!("{} {}", COUNTERS[j].0, previous[j] - at_last_change[i][j]))
+                    .collect();
+                if !others.is_empty() {
+                    tracing::warn!(
+                        "data path: stall: no packets {} for {quiet:.1?} (after {} in the 2 s before), while {}",
+                        COUNTERS[i].0,
+                        busy_before[i],
+                        others.join(", ")
+                    );
+                }
             }
+            last_change[i] = now;
+            busy_before[i] = current[i] - oldest[i];
+            at_last_change[i] = current;
         }
         history.push_back(current);
         if history.len() > HISTORY {
