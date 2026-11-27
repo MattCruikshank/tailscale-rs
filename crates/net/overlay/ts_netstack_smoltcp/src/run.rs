@@ -73,10 +73,12 @@ pub async fn run(
 ) {
     use futures_util::FutureExt;
 
-    // Spinning (METAL ISSUE-00049): smoltcp keeps saying "poll now" but nothing is sent.
-    const SPIN_ITERATIONS: u32 = 100;
-    let mut spin = 0u32;
-    let mut sent_before = crate::pipe::PACKETS_SENT.load(core::sync::atomic::Ordering::Relaxed);
+    // Spinning (METAL ISSUE-00049): the loop runs hundreds of times a second and nothing is
+    // sent. Per one-second window: iterations, what woke the loop, the timer smoltcp asked for.
+    const SPIN_PER_SECOND: u32 = 200;
+    let mut window = SpinWindow::default();
+    let mut window_start: Option<smoltcp::time::Instant> = None;
+    let mut sent_at_start = crate::pipe::PACKETS_SENT.load(core::sync::atomic::Ordering::Relaxed);
     let mut last_report: Option<smoltcp::time::Instant> = None;
 
     loop {
@@ -87,21 +89,41 @@ pub async fn run(
         let now = now();
 
         let delay = netstack.poll_delay(now);
-        let sent = crate::pipe::PACKETS_SENT.load(core::sync::atomic::Ordering::Relaxed);
-        if delay.is_some_and(|d| d < Duration::from_millis(1)) && sent == sent_before {
-            spin += 1;
-        } else {
-            spin = 0;
+        let start = *window_start.get_or_insert(now);
+        if now - start >= smoltcp::time::Duration::from_secs(1) {
+            let sent = crate::pipe::PACKETS_SENT.load(core::sync::atomic::Ordering::Relaxed);
+            if window.iterations >= SPIN_PER_SECOND
+                && sent == sent_at_start
+                && last_report.is_none_or(|t| now - t > smoltcp::time::Duration::from_secs(5))
+            {
+                last_report = Some(now);
+                tracing::warn!(
+                    "netstack: spinning: {} loop iterations in {} ms, nothing sent; woken by device {}, timer {}, command {}; \
+                     timer asked for min {:?} max {:?} (none {}x); {} commands processed, {} blocked; {}",
+                    window.iterations,
+                    (now - start).total_millis(),
+                    window.device,
+                    window.timer,
+                    window.command,
+                    window.min_delay,
+                    window.max_delay,
+                    window.no_delay,
+                    window.commands,
+                    netstack.blocked_command_count(),
+                    netstack.debug_sockets(now)
+                );
+            }
+            window = SpinWindow::default();
+            window_start = Some(now);
+            sent_at_start = sent;
         }
-        sent_before = sent;
-        if spin == SPIN_ITERATIONS
-            && last_report.is_none_or(|t| now - t > smoltcp::time::Duration::from_secs(5))
-        {
-            last_report = Some(now);
-            tracing::warn!(
-                "netstack: spinning: {SPIN_ITERATIONS} loop iterations asked to poll now and sent nothing; {}",
-                netstack.debug_sockets(now)
-            );
+        window.iterations += 1;
+        match delay {
+            Some(d) => {
+                window.min_delay = Some(window.min_delay.map_or(d, |m| m.min(d)));
+                window.max_delay = Some(window.max_delay.map_or(d, |m| m.max(d)));
+            }
+            None => window.no_delay += 1,
         }
         let span = tracing::trace_span!("loop", %now, ?delay);
         let cmd_fut = netstack.wait_for_cmd();
@@ -113,12 +135,16 @@ pub async fn run(
                 .instrument(span.clone())
                 .fuse() =>
             {
+                window.device += 1;
                 tracing::trace!(parent: &span, "device wakeup");
             },
             _ = option_timeout(sleep.clone(), delay).instrument(span.clone()).fuse() => {
+                window.timer += 1;
                 tracing::trace!(parent: &span, "timeout wakeup");
             },
             cmd = cmd_fut.instrument(span.clone()).fuse() => {
+                window.command += 1;
+                window.commands += 1;
                 span.in_scope(|| {
                     tracing::trace!("command wakeup");
 
@@ -136,6 +162,19 @@ pub async fn run(
             }
         ]
     }
+}
+
+/// What one second of the run loop looked like (spinning diagnostics).
+#[derive(Default)]
+struct SpinWindow {
+    iterations: u32,
+    device: u32,
+    timer: u32,
+    command: u32,
+    commands: u32,
+    no_delay: u32,
+    min_delay: Option<Duration>,
+    max_delay: Option<Duration>,
 }
 
 async fn option_timeout(sleep: impl AsyncFn(Duration), dur: Option<Duration>) {

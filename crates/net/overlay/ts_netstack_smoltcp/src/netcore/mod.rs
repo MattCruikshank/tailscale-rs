@@ -110,6 +110,11 @@ impl Netstack {
         }
     }
 
+    /// How many socket commands are waiting to be retried (they would block).
+    pub fn blocked_command_count(&self) -> usize {
+        self.blocked_commands.len()
+    }
+
     /// A one-line description of every socket and when smoltcp wants to be polled next — for
     /// diagnosing a netstack that keeps asking to be polled without sending anything.
     pub fn debug_sockets(&mut self, now: smoltcp::time::Instant) -> alloc::string::String {
