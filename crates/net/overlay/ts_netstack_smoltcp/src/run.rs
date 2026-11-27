@@ -88,6 +88,12 @@ pub async fn run(
         }
         let now = now();
 
+        // Commands first, every iteration: the select below is biased toward device I/O and the
+        // timer, so while those keep firing (a timer that says "now", steady traffic) the command
+        // branch is never polled, and the apps' sends, receives and closes wait (METAL
+        // ISSUE-00049/ISSUE-00056).
+        netstack.process_cmds();
+
         let delay = netstack.poll_delay(now);
         let start = *window_start.get_or_insert(now);
         if now - start >= smoltcp::time::Duration::from_secs(1) {

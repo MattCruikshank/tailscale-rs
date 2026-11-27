@@ -159,7 +159,13 @@ pub fn request_nonblocking(
             resp: resp_tx,
             complete_if_channel_dropped: true,
         }) {
-            Ok(_) | Err(flume::TrySendError::Full(_)) => Ok(()),
+            Ok(_) => Ok(()),
+            // Lost: only possible with a bounded command channel (see `Config`). Loud, because
+            // a lost close leaks the socket and leaves its peer waiting.
+            Err(flume::TrySendError::Full(_)) => {
+                tracing::warn!("netstack command channel full: command dropped");
+                Ok(())
+            }
             Err(flume::TrySendError::Disconnected(_)) => Err(ChannelClosedError),
         }
     }

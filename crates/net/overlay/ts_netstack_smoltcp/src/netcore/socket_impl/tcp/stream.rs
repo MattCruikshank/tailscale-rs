@@ -23,6 +23,23 @@ use crate::netcore::{
 /// authenticates every packet), and a FIN retransmitted after our ACK was lost gets a reset.
 pub(crate) const TIME_WAIT_GRACE: smoltcp::time::Duration = smoltcp::time::Duration::from_millis(100);
 
+/// How long a closed socket may wait in FIN-WAIT-2 for its peer's FIN (like Linux's
+/// `tcp_fin_timeout` for orphaned sockets; smoltcp has no limit). All our data and our FIN have
+/// been acknowledged, so removing it loses nothing; without a limit a peer whose FIN never
+/// comes keeps the socket — and its port — forever, and a new connection from that port meets
+/// it instead of the listener (METAL ISSUE-00056). The other closing states still have our data
+/// or FIN in flight and aren't limited (a slow reader's response isn't cut short).
+pub(crate) const FIN_WAIT_2_TIMEOUT: smoltcp::time::Duration = smoltcp::time::Duration::from_secs(15);
+
+/// The time limit for a closing socket's state, if any.
+fn closing_limit(state: tcp::State) -> Option<smoltcp::time::Duration> {
+    match state {
+        tcp::State::TimeWait => Some(TIME_WAIT_GRACE),
+        tcp::State::FinWait2 => Some(FIN_WAIT_2_TIMEOUT),
+        _ => None,
+    }
+}
+
 impl Netstack {
     /// Process a TCP stream command.
     #[tracing::instrument(skip_all, fields(?cmd, ?handle), level = "debug")]
@@ -127,34 +144,48 @@ impl Netstack {
         }
     }
 
-    /// Drop all TCP sockets that have finished closing — and those in TIME-WAIT once
-    /// [`TIME_WAIT_GRACE`] has passed.
+    /// Drop all TCP sockets that have finished closing — and those that stayed in TIME-WAIT
+    /// ([`TIME_WAIT_GRACE`]) or FIN-WAIT-2 ([`FIN_WAIT_2_TIMEOUT`]) too long.
     #[tracing::instrument(skip_all)]
     pub(crate) fn drain_tcp_closes(&mut self) {
-        let Self { pending_tcp_closes, socket_set, time_wait_since, now, .. } = self;
+        let Self { pending_tcp_closes, socket_set, closing_since, now, .. } = self;
         let now = *now;
         pending_tcp_closes.retain(|&handle| {
             let state = socket_set.get::<tcp::Socket>(handle).state();
-            let should_remove = match state {
-                tcp::State::Closed => true,
-                tcp::State::TimeWait => {
-                    let since = *time_wait_since.entry(handle).or_insert(now);
-                    now - since >= TIME_WAIT_GRACE
+            let should_remove = match closing_limit(state) {
+                _ if state == tcp::State::Closed => true,
+                Some(limit) => {
+                    // Since when in this state (a new state restarts the clock).
+                    let entry = closing_since.entry(handle).or_insert((state, now));
+                    if entry.0 != state {
+                        *entry = (state, now);
+                    }
+                    let expired = now - entry.1 >= limit;
+                    if expired && state == tcp::State::FinWait2 {
+                        tracing::debug!(?handle, "FIN-WAIT-2 timed out: the peer never closed");
+                    }
+                    expired
                 }
-                _ => false,
+                None => {
+                    closing_since.remove(&handle);
+                    false
+                }
             };
             if should_remove {
                 socket_set.remove(handle);
-                time_wait_since.remove(&handle);
+                closing_since.remove(&handle);
             }
 
             !should_remove
         });
     }
 
-    /// When the next TIME-WAIT socket's grace ends (so the run loop wakes up to remove it).
-    pub(crate) fn next_time_wait_removal(&self) -> Option<smoltcp::time::Instant> {
-        self.time_wait_since.values().min().map(|&since| since + TIME_WAIT_GRACE)
+    /// When the next time-limited closing socket is due (so the run loop wakes up to remove it).
+    pub(crate) fn next_closing_removal(&self) -> Option<smoltcp::time::Instant> {
+        self.closing_since
+            .values()
+            .filter_map(|&(state, since)| closing_limit(state).map(|limit| since + limit))
+            .min()
     }
 
     fn check_conn(&mut self, handle: SocketHandle, orig_cmd: TcpStreamCommand) -> Response {

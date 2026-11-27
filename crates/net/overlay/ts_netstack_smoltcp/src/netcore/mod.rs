@@ -55,8 +55,9 @@ pub struct Netstack {
     /// Set of TCP socket handles that are expected to close in the future, held onto for
     /// graceful shutdown.
     pending_tcp_closes: Vec<SocketHandle>,
-    /// When each closing socket entered TIME-WAIT (see [`TIME_WAIT_GRACE`]).
-    time_wait_since: BTreeMap<SocketHandle, smoltcp::time::Instant>,
+    /// For closing sockets in a state with a time limit (TIME-WAIT, FIN-WAIT-2): the state and
+    /// since when (see `drain_tcp_closes`).
+    closing_since: BTreeMap<SocketHandle, (smoltcp::socket::tcp::State, smoltcp::time::Instant)>,
     /// The time of the latest poll (`poll_delay`/`poll_at`), for removing TIME-WAIT sockets.
     now: smoltcp::time::Instant,
 
@@ -109,7 +110,7 @@ impl Netstack {
             config: ns_config,
             blocked_commands: Default::default(),
             pending_tcp_closes: Default::default(),
-            time_wait_since: Default::default(),
+            closing_since: Default::default(),
             now,
             tcp_listeners: Default::default(),
             next_tcp_listener_id: 0,
@@ -173,7 +174,7 @@ impl Netstack {
         self.now = now;
         let at = self.iface.poll_at(now, &self.socket_set);
         // Also wake up to remove a TIME-WAIT socket when its grace ends.
-        match (at, self.next_time_wait_removal()) {
+        match (at, self.next_closing_removal()) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
         }

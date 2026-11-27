@@ -117,7 +117,9 @@ impl kameo::Actor for Runtime {
                 env.clone(),
                 netstack::netcore::Config {
                     tcp_buffer_size: 64 * 1024,
-                    command_channel_capacity: Some(128),
+                    // Unbounded: with a bound, a dropped socket's close is lost when the
+                    // channel is full under load, leaking the connection (see the Config docs).
+                    command_channel_capacity: None,
                     ..Default::default()
                 },
                 netstack_id,

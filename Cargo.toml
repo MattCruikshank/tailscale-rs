@@ -263,3 +263,8 @@ name = "tcp_echo"
 [[example]]
 name = "ssh_peer_lookup"
 required-features = ["ssh"]
+
+[patch.crates-io]
+# METAL: TCP segments reach connections before listening sockets (MattCruikshank/smoltcp, branch
+# metal): a resent SYN taken by a fresh listener reset the real connection.
+smoltcp = { git = "https://github.com/MattCruikshank/smoltcp", branch = "metal" }

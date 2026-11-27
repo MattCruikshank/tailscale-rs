@@ -3,7 +3,11 @@
 pub struct Config {
     /// Capacity of the command channel.
     ///
-    /// If `None`, the channel is unbounded.
+    /// If `None` (the default), the channel is unbounded. With a bound, fire-and-forget commands
+    /// (a dropped socket's close) are **lost** when it's full — the socket is never closed and
+    /// its peer waits for a FIN forever — so only bound it if nothing is dropped under load.
+    /// Unbounded is safe: every other command's caller awaits its reply, so the queue holds at
+    /// most about one command per waiting task.
     pub command_channel_capacity: Option<usize>,
 
     /// Maximum transmission unit of the underlying net device.
@@ -29,7 +33,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            command_channel_capacity: Some(32),
+            command_channel_capacity: None,
 
             mtu: 1280,
 
