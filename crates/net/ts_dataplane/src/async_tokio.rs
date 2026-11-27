@@ -238,12 +238,14 @@ impl DataPlane {
         // having to wait for the network or a timer to make progress (which may never happen)
 
         let select_result = {
+            let waited = std::time::Instant::now();
             let next_event = {
                 let state = self.core_state.lock().await;
                 state.sync.next_event()
             };
 
             let mut poll_state = self.poll_state.lock().await;
+            crate::timing::report_slow("waiting for the locks before a step", waited.elapsed());
 
             let PollState {
                 from_overlay: overlay_down,
@@ -254,6 +256,7 @@ impl DataPlane {
             tokio::select! {
                 overlay_pkts = overlay_down.recv() => {
                     let (overlay_id, overlay_pkts) = overlay_pkts.unwrap();
+                    crate::timing::count(&crate::timing::OVERLAY_IN, overlay_pkts.len());
                     tracing::trace!(n_overlay_pkts = overlay_pkts.len());
 
                     SelectResult::OverlayDown((overlay_id, overlay_pkts))
@@ -261,6 +264,7 @@ impl DataPlane {
 
                 underlay_pkts = underlay_up.recv() => {
                     let (id, ep, underlay_pkts) = underlay_pkts.unwrap();
+                    crate::timing::count(&crate::timing::UNDERLAY_IN, underlay_pkts.len());
                     tracing::trace!(underlay_id = ?id, from_ep = ?ep, n_underlay_pkts = underlay_pkts.len());
 
                     SelectResult::UnderlayUp((id, ep, underlay_pkts))
@@ -280,7 +284,15 @@ impl DataPlane {
             }
         };
 
+        let update = std::time::Instant::now();
         let mut core = self.core_state.lock().await;
+        crate::timing::report_slow("waiting for the core lock in a step", update.elapsed());
+        let kind = match &select_result {
+            SelectResult::OverlayDown(_) => "a step (packets from the overlay)",
+            SelectResult::UnderlayUp(_) => "a step (packets from the underlay)",
+            SelectResult::TransportsChanged => "a step (transports changed)",
+            SelectResult::Event => "a step (timer events)",
+        };
 
         // To avoid cloning the active peer map repeatedly to compare it against the last state,
         // compare the length before and after processing packets. It can only grow unless a GC ran
@@ -357,6 +369,7 @@ impl DataPlane {
         if let Some(to_local) = to_local {
             write_to_overlay(&core, to_local).await;
         }
+        crate::timing::report_slow(kind, update.elapsed());
     }
 
     /// Get a mutable reference to the inner [`crate::DataPlane`].
@@ -365,8 +378,45 @@ impl DataPlane {
     ///
     /// The returned value is a mutex guard, so limit how long it's held.
     pub async fn inner(&self) -> impl DerefMut<Target = crate::DataPlane> {
+        let waited = std::time::Instant::now();
         let core = self.core_state.lock().await;
-        tokio::sync::MutexGuard::map(core, |x| &mut x.sync)
+        crate::timing::report_slow(
+            "waiting for the core lock (routing update)",
+            waited.elapsed(),
+        );
+        TimedGuard {
+            guard: tokio::sync::MutexGuard::map(core, |x| &mut x.sync),
+            since: std::time::Instant::now(),
+        }
+    }
+}
+
+/// A lock guard that reports being held longer than [`crate::timing::SLOW`] (every packet waits
+/// for this lock).
+struct TimedGuard<G> {
+    guard: G,
+    since: std::time::Instant,
+}
+
+impl<G: core::ops::Deref> core::ops::Deref for TimedGuard<G> {
+    type Target = G::Target;
+    fn deref(&self) -> &Self::Target {
+        &self.guard
+    }
+}
+
+impl<G: DerefMut> DerefMut for TimedGuard<G> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.guard
+    }
+}
+
+impl<G> Drop for TimedGuard<G> {
+    fn drop(&mut self) {
+        crate::timing::report_slow(
+            "holding the core lock (routing update)",
+            self.since.elapsed(),
+        );
     }
 }
 
@@ -374,6 +424,7 @@ async fn write_to_overlay(slf: &CoreState, packets: HashMap<OverlayTransportId, 
     for (id, packets) in packets {
         if let Some(queue) = slf.overlay_transports.get(&id) {
             tracing::trace!(overlay_id = ?id, n_packets = packets.len(), "overlay packets");
+            crate::timing::count(&crate::timing::OVERLAY_OUT, packets.len());
             // The transport may be gone while the runtime shuts down: drop its packets rather
             // than panic (panics abort the whole OS on Hermit).
             if queue.send(packets).is_err() {
@@ -388,6 +439,7 @@ async fn write_to_underlay(slf: &CoreState, packets: underlay_router::outbound::
         tracing::trace!(underlay_id = ?tid, ?endpoint, n_packets = packets.len(), "underlay data packets");
 
         if let Some(queue) = slf.underlay_transports.get(&tid) {
+            crate::timing::count(&crate::timing::UNDERLAY_OUT, packets.len());
             // As above: a transport that's gone during shutdown isn't worth a panic.
             if queue.send((endpoint, packets)).is_err() {
                 tracing::debug!(underlay_id = ?tid, "underlay transport gone; dropping packets");

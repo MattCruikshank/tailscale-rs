@@ -18,6 +18,7 @@ use ts_tunnel::{Endpoint, NodeKeyPair};
 pub mod async_tokio;
 pub mod overlay_router;
 mod packet_ident;
+pub mod timing;
 pub mod underlay_router;
 
 pub use packet_ident::{PacketIdent, PacketType};

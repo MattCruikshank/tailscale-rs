@@ -269,34 +269,6 @@ impl ControlRunner {
         deleg
     }
 
-    /// Ask the control server to publish a DNS record for this node — what ACME's DNS-01
-    /// challenge needs for a `*.ts.net` certificate (`_acme-challenge.<fqdn>`, type `TXT`).
-    /// The control server only accepts names belonging to this node.
-    #[message]
-    pub async fn set_dns(&mut self, name: String, record_type: String, value: String) -> Result<(), String> {
-        let RegState::Registered(conn) = &self.state else {
-            return Err("not registered with the control server".into());
-        };
-        let body = serde_json::json!({
-            "Version": ts_capabilityversion::CapabilityVersion::CURRENT.to_string().parse::<u64>().unwrap_or(0),
-            "NodeKey": self.params.env.keys.node_keys.public.to_string(),
-            "Name": name,
-            "Type": record_type,
-            "Value": value,
-        })
-        .to_string();
-        let url = self.params.config.server_url.join("machine/set-dns").map_err(|e| e.to_string())?;
-        use ts_http_util::ClientExt as _;
-        let resp = conn
-            .post(&url, None, bytes::Bytes::from(body).into())
-            .await
-            .map_err(|e| format!("set-dns: {e}"))?;
-        if !resp.status().is_success() {
-            return Err(format!("set-dns: the control server answered {}", resp.status()));
-        }
-        Ok(())
-    }
-
     /// Wait for a report of whether interactive auth is needed, and if so, what the URL is.
     #[message(ctx)]
     pub fn auth_url(
@@ -390,6 +362,63 @@ impl ControlRunner {
         })
         .await
         .unwrap();
+    }
+}
+
+/// Ask the control server to publish a DNS record for this node — what ACME's DNS-01 challenge
+/// needs for a `*.ts.net` certificate (`_acme-challenge.<fqdn>`, type `TXT`). The control server
+/// only accepts names belonging to this node.
+#[derive(Debug, Clone)]
+pub struct SetDns {
+    /// The record's name, e.g. `_acme-challenge.host.tail1234.ts.net`.
+    pub name: String,
+    /// The record type, e.g. `TXT`.
+    pub record_type: String,
+    /// The record's value.
+    pub value: String,
+}
+
+impl Message<SetDns> for ControlRunner {
+    type Reply = Result<(), String>;
+
+    async fn handle(
+        &mut self,
+        SetDns {
+            name,
+            record_type,
+            value,
+        }: SetDns,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let RegState::Registered(conn) = &self.state else {
+            return Err("not registered with the control server".into());
+        };
+        let body = serde_json::json!({
+            "Version": ts_capabilityversion::CapabilityVersion::CURRENT.to_string().parse::<u64>().unwrap_or(0),
+            "NodeKey": self.params.env.keys.node_keys.public.to_string(),
+            "Name": name,
+            "Type": record_type,
+            "Value": value,
+        })
+        .to_string();
+        let url = self
+            .params
+            .config
+            .server_url
+            .join("machine/set-dns")
+            .map_err(|e| e.to_string())?;
+        use ts_http_util::ClientExt as _;
+        let resp = conn
+            .post(&url, None, bytes::Bytes::from(body).into())
+            .await
+            .map_err(|e| format!("set-dns: {e}"))?;
+        if !resp.status().is_success() {
+            return Err(format!(
+                "set-dns: the control server answered {}",
+                resp.status()
+            ));
+        }
+        Ok(())
     }
 }
 

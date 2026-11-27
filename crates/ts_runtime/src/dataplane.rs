@@ -134,6 +134,12 @@ impl kameo::Actor for DataplaneActor {
         })
         .await;
 
+        // Cheap timing of the data path (counters, slow steps, a hand-off that goes quiet).
+        Task::spawn_link(&slf, async move {
+            ts_dataplane::timing::watchdog().await;
+        })
+        .await;
+
         tracing::trace!("dataplane running");
         env.register(None, &slf).await?;
 

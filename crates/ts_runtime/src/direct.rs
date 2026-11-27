@@ -202,6 +202,7 @@ fn udp_rx(sock: impl Borrow<UdpSocket>) -> impl Stream<Item = UdpRx> {
         };
 
         tracing::trace!(n_pkts = v.len(), "udp rx batch");
+        ts_dataplane::timing::count(&ts_dataplane::timing::UDP_RX, v.len());
 
         Ok(Some((v.into_iter().into_group_map(), (sock, buf))))
     })
@@ -381,11 +382,15 @@ impl Message<StreamMessage<UdpTx, (), ()>> for DirectActor {
 
         tracing::trace!(?ep_info, selected_addr = %addr, n_pkts = pkts.len(), "udp tx batch");
 
+        let started = std::time::Instant::now();
         for pkt in pkts {
             if let Err(e) = sock.send_to(&pkt, addr).await {
                 tracing::error!(error = %e, "sending packet");
+            } else {
+                ts_dataplane::timing::count(&ts_dataplane::timing::UDP_TX, 1);
             }
         }
+        ts_dataplane::timing::report_slow("sending a UDP batch", started.elapsed());
     }
 }
 
