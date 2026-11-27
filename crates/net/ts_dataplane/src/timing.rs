@@ -68,14 +68,16 @@ const QUIET_MIN: Duration = Duration::from_secs(1);
 const QUIET_MAX: Duration = Duration::from_secs(30);
 /// Busy before the gap: at least this many packets in the 2 s before it (~100/s).
 const BUSY_PACKETS: u64 = 200;
-/// ... and busy again after it: at least this many packets in the second after it resumed.
-const BUSY_AFTER_PACKETS: u64 = 100;
+/// ... and a burst when it resumes: at least this many packets in the second after (a stall
+/// ending releases every stuck connection's retransmissions at once; a keepalive after a pause
+/// is a packet or two). Not "busy again": a stall at the end of a burst of traffic counts too.
+const BUSY_AFTER_PACKETS: u64 = 20;
 /// Ticks of history kept (2 s).
 const HISTORY: usize = 8;
 
 /// Watches the counters forever (spawn it once). Reports a **gap** when a counter resumes: it
 /// had moved at least 200 packets in the 2 s before it went quiet, was quiet for 1–30 s, and
-/// moved at least 100 in the second after it resumed (a gap *in* busy traffic) —
+/// moved at least 20 in the second after it resumed (the burst a stall's end releases) —
 /// with how many packets every hand-off moved during the gap, which says where packets
 /// stopped (all zero: the whole tunnel; one zero among others: that hand-off). Light traffic
 /// and pauses aren't reported. A late tick (the runtime didn't run the watchdog for over
