@@ -55,6 +55,10 @@ pub struct Netstack {
     /// Set of TCP socket handles that are expected to close in the future, held onto for
     /// graceful shutdown.
     pending_tcp_closes: Vec<SocketHandle>,
+    /// When each closing socket entered TIME-WAIT (see [`TIME_WAIT_GRACE`]).
+    time_wait_since: BTreeMap<SocketHandle, smoltcp::time::Instant>,
+    /// The time of the latest poll (`poll_delay`/`poll_at`), for removing TIME-WAIT sockets.
+    now: smoltcp::time::Instant,
 
     /// Active TCP listeners.
     ///
@@ -105,6 +109,8 @@ impl Netstack {
             config: ns_config,
             blocked_commands: Default::default(),
             pending_tcp_closes: Default::default(),
+            time_wait_since: Default::default(),
+            now,
             tcp_listeners: Default::default(),
             next_tcp_listener_id: 0,
         }
@@ -164,14 +170,18 @@ impl Netstack {
 
     /// Report the next time the netstack should be polled.
     pub fn poll_at(&mut self, now: smoltcp::time::Instant) -> Option<smoltcp::time::Instant> {
-        self.iface.poll_at(now, &self.socket_set)
+        self.now = now;
+        let at = self.iface.poll_at(now, &self.socket_set);
+        // Also wake up to remove a TIME-WAIT socket when its grace ends.
+        match (at, self.next_time_wait_removal()) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
     }
 
     /// Report the amount of time until the netstack should next be polled.
     pub fn poll_delay(&mut self, now: smoltcp::time::Instant) -> Option<core::time::Duration> {
-        self.iface
-            .poll_delay(now, &self.socket_set)
-            .map(|x| x.into())
+        self.poll_at(now).map(|at| if at > now { (at - now).into() } else { core::time::Duration::ZERO })
     }
 
     /// Process all commands available in the command queue.

@@ -141,6 +141,9 @@ pub async fn run(
             _ = option_timeout(sleep.clone(), delay).instrument(span.clone()).fuse() => {
                 window.timer += 1;
                 tracing::trace!(parent: &span, "timeout wakeup");
+                // Sockets that finished closing on a timer (no packet, so no "progress") are
+                // removed now, not when something else happens.
+                netstack.drain_tcp_closes();
             },
             cmd = cmd_fut.instrument(span.clone()).fuse() => {
                 window.command += 1;

@@ -10,6 +10,15 @@
 //! that drops packets at random and delays the rest (which may reorder them), so TCP's
 //! retransmission paths run too. With loss, an exchange may take up to 5 s (several
 //! retransmissions); without, 1 s.
+//!
+//! Clients pick their local port at random from 49152-65535 as Windows does
+//! (`NETSTACK_STRESS_PORTS=sequential`: counting up from 20000 instead), so at a few hundred
+//! connections a second a new connection can reuse the port of one the server still holds in
+//! TIME-WAIT — what METAL's soak does to its tailnet netstack (ISSUE-00049). Like an OS's
+//! allocator, it never picks a port its own side may still be using: a live connection, or one
+//! that ended less than 30 s ago (the client's socket can sit in LAST-ACK for a few FIN
+//! retransmissions when the server's last ACK, or its reset, is lost). That caps the random
+//! mode at ~550 connections a second (16,384 ports / 30 s) — more than METAL's soak makes.
 
 use core::{
     net::SocketAddr,
@@ -28,6 +37,8 @@ const REQUEST: usize = 200;
 const RESPONSE: usize = 4096;
 /// An exchange slower than this fails the test.
 const SLOW: Duration = Duration::from_secs(1);
+/// A client port is reused only this long after its exchange ended.
+const PORT_REUSE_AFTER: Duration = Duration::from_secs(30);
 
 fn env(name: &str, default: u64) -> u64 {
     std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
@@ -37,11 +48,15 @@ fn env(name: &str, default: u64) -> u64 {
 struct Rng(u64);
 
 impl Rng {
-    fn percent(&mut self) -> u64 {
+    fn next(&mut self) -> u64 {
         self.0 ^= self.0 >> 12;
         self.0 ^= self.0 << 25;
         self.0 ^= self.0 >> 27;
-        self.0.wrapping_mul(0x2545_f491_4f6c_dd1d) % 100
+        self.0.wrapping_mul(0x2545_f491_4f6c_dd1d)
+    }
+
+    fn percent(&mut self) -> u64 {
+        self.next() % 100
     }
 }
 
@@ -148,16 +163,51 @@ async fn many_short_exchanges_never_stall() {
     });
 
     let next_port = Arc::new(AtomicU16::new(20000));
+    // Client ports in use (until the time they're free again), shared by all clients.
+    let ports_in_use = Arc::new(std::sync::Mutex::new(std::collections::HashMap::<u16, Instant>::new()));
     let exchanges = Arc::new(AtomicU64::new(0));
     let slowest_ms = Arc::new(AtomicU64::new(0));
     let end = Instant::now() + Duration::from_secs(secs);
     let mut tasks = Vec::new();
     for _ in 0..clients {
-        let (ch, next_port, exchanges, slowest_ms, client_errors) =
-            (client_ch.clone(), next_port.clone(), exchanges.clone(), slowest_ms.clone(), client_errors.clone());
+        let (ch, next_port, exchanges, slowest_ms, client_errors, ports_in_use) = (
+            client_ch.clone(),
+            next_port.clone(),
+            exchanges.clone(),
+            slowest_ms.clone(),
+            client_errors.clone(),
+            ports_in_use.clone(),
+        );
         tasks.push(tokio::spawn(async move {
+            let mut rng = Rng(0x2545_f491_4f6c_dd1d ^ (next_port.fetch_add(7919, Ordering::Relaxed) as u64) << 17);
+            let random_ports = std::env::var("NETSTACK_STRESS_PORTS").as_deref() != Ok("sequential");
             while Instant::now() < end {
-                let port = 20000 + next_port.fetch_add(1, Ordering::Relaxed) % 40000;
+                // A free port (in use until the exchange ends; updated below). If none is free
+                // right now, wait a little outside the lock.
+                let port = loop {
+                    let picked = {
+                        let mut in_use = ports_in_use.lock().unwrap();
+                        let now = Instant::now();
+                        (0..64)
+                            .map(|_| {
+                                if random_ports {
+                                    49152 + (rng.next() % 16384) as u16
+                                } else {
+                                    20000 + next_port.fetch_add(1, Ordering::Relaxed) % 40000
+                                }
+                            })
+                            .find(|p| in_use.get(p).is_none_or(|free_at| *free_at <= now))
+                            .inspect(|&p| {
+                                in_use.insert(p, now + Duration::from_secs(3600));
+                            })
+                    };
+                    match picked {
+                        Some(p) => break p,
+                        // Out of ports at the end of the run: done.
+                        None if Instant::now() >= end => return,
+                        None => tokio::time::sleep(Duration::from_millis(10)).await,
+                    }
+                };
                 let local = SocketAddr::new(client_ip, port);
                 let started = Instant::now();
                 let exchange = async {
@@ -165,7 +215,9 @@ async fn many_short_exchanges_never_stall() {
                     send_all(&sock, &[b'q'; REQUEST]).await?;
                     recv_exact(&sock, RESPONSE).await
                 };
-                match tokio::time::timeout(Duration::from_secs(20), exchange).await {
+                let finished = tokio::time::timeout(Duration::from_secs(20), exchange).await;
+                ports_in_use.lock().unwrap().insert(port, Instant::now() + PORT_REUSE_AFTER);
+                match finished {
                     Err(_) => panic!("an exchange (local port {port}) didn't finish within 20 s"),
                     Ok(Err(e)) => {
                         *client_errors.lock().unwrap().entry(e).or_insert(0) += 1;

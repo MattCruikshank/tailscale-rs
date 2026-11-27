@@ -9,6 +9,20 @@ use crate::netcore::{
     },
 };
 
+
+/// How long a closed connection stays in TIME-WAIT here: just long enough for our final ACK
+/// (smoltcp delays ACKs up to 10 ms) to go out, instead of TCP's usual ~10 s (smoltcp) or 60 s.
+///
+/// METAL ISSUE-00049/ISSUE-00057: a server closing a few hundred connections a second held
+/// thousands of TIME-WAIT sockets, and a client's new connection reusing a port found the old one
+/// instead of the listener — its SYN went unanswered until TIME-WAIT ended (1, 3, 7, 15 s
+/// stalls); every wake-up also walked all of them. Dropping a socket the moment it enters
+/// TIME-WAIT loses that delayed ACK (the client then waits in LAST-ACK, and a new connection on
+/// its port lands on the old socket). The cost of a short TIME-WAIT: an old duplicate segment
+/// could reach a new connection on the same ports (unlikely on a tailnet, where WireGuard
+/// authenticates every packet), and a FIN retransmitted after our ACK was lost gets a reset.
+pub(crate) const TIME_WAIT_GRACE: smoltcp::time::Duration = smoltcp::time::Duration::from_millis(100);
+
 impl Netstack {
     /// Process a TCP stream command.
     #[tracing::instrument(skip_all, fields(?cmd, ?handle), level = "debug")]
@@ -113,22 +127,34 @@ impl Netstack {
         }
     }
 
-    /// Drop all TCP sockets that have finished closing.
+    /// Drop all TCP sockets that have finished closing — and those in TIME-WAIT once
+    /// [`TIME_WAIT_GRACE`] has passed.
     #[tracing::instrument(skip_all)]
     pub(crate) fn drain_tcp_closes(&mut self) {
-        self.pending_tcp_closes.retain(|&handle| {
-            let state = {
-                let sock = self.socket_set.get::<tcp::Socket>(handle);
-                sock.state()
+        let Self { pending_tcp_closes, socket_set, time_wait_since, now, .. } = self;
+        let now = *now;
+        pending_tcp_closes.retain(|&handle| {
+            let state = socket_set.get::<tcp::Socket>(handle).state();
+            let should_remove = match state {
+                tcp::State::Closed => true,
+                tcp::State::TimeWait => {
+                    let since = *time_wait_since.entry(handle).or_insert(now);
+                    now - since >= TIME_WAIT_GRACE
+                }
+                _ => false,
             };
-
-            let should_remove = state == tcp::State::Closed;
             if should_remove {
-                self.socket_set.remove(handle);
+                socket_set.remove(handle);
+                time_wait_since.remove(&handle);
             }
 
             !should_remove
         });
+    }
+
+    /// When the next TIME-WAIT socket's grace ends (so the run loop wakes up to remove it).
+    pub(crate) fn next_time_wait_removal(&self) -> Option<smoltcp::time::Instant> {
+        self.time_wait_since.values().min().map(|&since| since + TIME_WAIT_GRACE)
     }
 
     fn check_conn(&mut self, handle: SocketHandle, orig_cmd: TcpStreamCommand) -> Response {
