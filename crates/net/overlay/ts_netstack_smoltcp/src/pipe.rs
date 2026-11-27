@@ -13,6 +13,10 @@ use smoltcp::{
 
 use crate::{netcore, netcore::Pipe};
 
+/// Packets sent through any [`WakingPipeDev`] (for spotting a netstack that polls without
+/// sending; see [`crate::run`]).
+pub static PACKETS_SENT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 /// Bidirectional pipe carrying byte buffer payloads.
 ///
 /// This is like [`netcore::Pipe`], except that it also implements
@@ -260,6 +264,7 @@ impl smoltcp::phy::TxToken for WakingPipeSender {
         let mut b = BytesMut::zeroed(len);
 
         let ret = f(&mut b);
+        PACKETS_SENT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         if self.tx.send(b.freeze()).is_err() {
             tracing::warn!("remote end of dropped on send");
         }

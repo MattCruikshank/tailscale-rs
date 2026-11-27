@@ -110,6 +110,53 @@ impl Netstack {
         }
     }
 
+    /// A one-line description of every socket and when smoltcp wants to be polled next — for
+    /// diagnosing a netstack that keeps asking to be polled without sending anything.
+    pub fn debug_sockets(&mut self, now: smoltcp::time::Instant) -> alloc::string::String {
+        use core::fmt::Write;
+        use smoltcp::socket::Socket;
+        let mut out = alloc::string::String::new();
+        let _ = write!(out, "poll_delay {:?}, ip addrs {:?};", self.poll_delay(now), self.iface.ip_addrs());
+        let (mut listening, mut shown) = (0, 0);
+        for (handle, socket) in self.socket_set.iter() {
+            match socket {
+                Socket::Tcp(s) if s.state() == smoltcp::socket::tcp::State::Listen => listening += 1,
+                Socket::Tcp(s) => {
+                    shown += 1;
+                    if shown > 24 {
+                        continue;
+                    }
+                    let _ = write!(
+                        out,
+                        " tcp {handle} {} {:?}->{:?} sendq {} recvq {} may_send {} can_send {} nagle {} ack_delay {:?} timeout {:?};",
+                        s.state(),
+                        s.local_endpoint(),
+                        s.remote_endpoint(),
+                        s.send_queue(),
+                        s.recv_queue(),
+                        s.may_send(),
+                        s.can_send(),
+                        s.nagle_enabled(),
+                        s.ack_delay(),
+                        s.timeout(),
+                    );
+                }
+                Socket::Udp(s) => {
+                    let _ = write!(out, " udp {handle} {:?} sendq {} recvq {};", s.endpoint(), s.send_queue(), s.recv_queue());
+                }
+                #[allow(unreachable_patterns)]
+                _ => {
+                    let _ = write!(out, " other {handle};");
+                }
+            }
+        }
+        if shown > 24 {
+            let _ = write!(out, " ... {} more tcp;", shown - 24);
+        }
+        let _ = write!(out, " {listening} tcp listening");
+        out
+    }
+
     /// Report the next time the netstack should be polled.
     pub fn poll_at(&mut self, now: smoltcp::time::Instant) -> Option<smoltcp::time::Instant> {
         self.iface.poll_at(now, &self.socket_set)

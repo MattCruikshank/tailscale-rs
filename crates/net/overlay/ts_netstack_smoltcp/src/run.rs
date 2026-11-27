@@ -73,6 +73,12 @@ pub async fn run(
 ) {
     use futures_util::FutureExt;
 
+    // Spinning (METAL ISSUE-00049): smoltcp keeps saying "poll now" but nothing is sent.
+    const SPIN_ITERATIONS: u32 = 100;
+    let mut spin = 0u32;
+    let mut sent_before = crate::pipe::PACKETS_SENT.load(core::sync::atomic::Ordering::Relaxed);
+    let mut last_report: Option<smoltcp::time::Instant> = None;
+
     loop {
         // SAFETY: a non-null pointer came from a `&'static AtomicU64` (`set_loop_counter`).
         if let Some(counter) = unsafe { LOOP_COUNTER.load(core::sync::atomic::Ordering::Acquire).as_ref() } {
@@ -81,6 +87,22 @@ pub async fn run(
         let now = now();
 
         let delay = netstack.poll_delay(now);
+        let sent = crate::pipe::PACKETS_SENT.load(core::sync::atomic::Ordering::Relaxed);
+        if delay.is_some_and(|d| d < Duration::from_millis(1)) && sent == sent_before {
+            spin += 1;
+        } else {
+            spin = 0;
+        }
+        sent_before = sent;
+        if spin == SPIN_ITERATIONS
+            && last_report.is_none_or(|t| now - t > smoltcp::time::Duration::from_secs(5))
+        {
+            last_report = Some(now);
+            tracing::warn!(
+                "netstack: spinning: {SPIN_ITERATIONS} loop iterations asked to poll now and sent nothing; {}",
+                netstack.debug_sockets(now)
+            );
+        }
         let span = tracing::trace_span!("loop", %now, ?delay);
         let cmd_fut = netstack.wait_for_cmd();
 
