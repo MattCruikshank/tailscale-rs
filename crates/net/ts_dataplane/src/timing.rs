@@ -57,18 +57,18 @@ const QUIET_MIN: Duration = Duration::from_secs(1);
 const QUIET_MAX: Duration = Duration::from_secs(30);
 /// Busy before the gap: at least this many packets in the 2 s before it (~100/s).
 const BUSY_PACKETS: u64 = 200;
-/// During the gap, another counter moved at least this many packets (TCP retransmissions of a
-/// handful of connections; keepalives and disco alone don't reach it).
-const OTHERS_PACKETS: u64 = 8;
+/// ... and busy again after it: at least this many packets in the second after it resumed.
+const BUSY_AFTER_PACKETS: u64 = 100;
 /// Ticks of history kept (2 s).
 const HISTORY: usize = 8;
 
-/// Watches the counters forever (spawn it once). Reports a **stall** when a counter resumes:
-/// it had moved at least 200 packets in the 2 s before it went quiet, it was quiet for 1–30 s,
-/// and meanwhile another counter moved at least 8 packets — naming which ones, and how many.
-/// That's the shape of a tunnel-wide stall under load (something keeps trying while one
-/// hand-off is stuck); a pause in traffic, a burst ending, or keepalives aren't reported. A late
-/// tick (the runtime didn't run the watchdog for over 500 ms) is reported too.
+/// Watches the counters forever (spawn it once). Reports a **gap** when a counter resumes: it
+/// had moved at least 200 packets in the 2 s before it went quiet, was quiet for 1–30 s, and
+/// moved at least 100 in the second after it resumed (a gap *in* busy traffic) —
+/// with how many packets every hand-off moved during the gap, which says where packets
+/// stopped (all zero: the whole tunnel; one zero among others: that hand-off). Light traffic
+/// and pauses aren't reported. A late tick (the runtime didn't run the watchdog for over
+/// 500 ms) is reported too.
 pub async fn watchdog() -> core::convert::Infallible {
     let snapshot = || COUNTERS.map(|(_, c)| c.load(Ordering::Relaxed));
     let mut history = std::collections::VecDeque::from([snapshot()]);
@@ -79,6 +79,8 @@ pub async fn watchdog() -> core::convert::Infallible {
     let mut interval = tokio::time::interval(TICK);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut last_tick = Instant::now();
+    // Gaps waiting for the second after they ended: (counter, its value then, when, report).
+    let mut pending: Vec<(usize, u64, Instant, String)> = Vec::new();
     loop {
         interval.tick().await;
         let now = Instant::now();
@@ -98,23 +100,35 @@ pub async fn watchdog() -> core::convert::Infallible {
             }
             let quiet = now.duration_since(last_change[i]);
             if quiet > QUIET_MIN && quiet <= QUIET_MAX && busy_before[i] >= BUSY_PACKETS {
-                let others: Vec<String> = (0..COUNTERS.len())
-                    .filter(|&j| j != i && previous[j] - at_last_change[i][j] >= OTHERS_PACKETS)
+                let during: Vec<String> = (0..COUNTERS.len())
+                    .filter(|&j| j != i)
                     .map(|j| format!("{} {}", COUNTERS[j].0, previous[j] - at_last_change[i][j]))
                     .collect();
-                if !others.is_empty() {
-                    tracing::warn!(
-                        "data path: stall: no packets {} for {quiet:.1?} (after {} in the 2 s before), while {}",
+                pending.push((
+                    i,
+                    previous[i],
+                    now,
+                    format!(
+                        "data path: gap: no packets {} for {quiet:.1?} (after {} in the 2 s before); meanwhile {}",
                         COUNTERS[i].0,
                         busy_before[i],
-                        others.join(", ")
-                    );
-                }
+                        during.join(", ")
+                    ),
+                ));
             }
             last_change[i] = now;
             busy_before[i] = current[i] - oldest[i];
             at_last_change[i] = current;
         }
+        pending.retain(|(i, at, when, report)| {
+            if now.duration_since(*when) < Duration::from_secs(1) {
+                return true;
+            }
+            if current[*i] - at >= BUSY_AFTER_PACKETS {
+                tracing::warn!("{report}");
+            }
+            false
+        });
         history.push_back(current);
         if history.len() > HISTORY {
             history.pop_front();
