@@ -352,16 +352,22 @@ impl ControlRunner {
             return;
         };
 
-        self.with_map_request(false, async |req| {
-            send_map_request(
-                req,
-                &self.params.config.server_url.join("machine/map").unwrap(),
-                conn,
-            )
+        // A failed update (the control connection dropped) mustn't panic: on a platform where
+        // panics abort, that ended the whole program. Nothing is lost by skipping it: what it
+        // carries (endpoints, DERP latencies) is kept here and goes with the next map request.
+        if let Err(e) = self
+            .with_map_request(false, async |req| {
+                send_map_request(
+                    req,
+                    &self.params.config.server_url.join("machine/map").unwrap(),
+                    conn,
+                )
+                .await
+            })
             .await
-        })
-        .await
-        .unwrap();
+        {
+            tracing::warn!(error = %e, "sending a map update failed; it goes with the next map request");
+        }
     }
 }
 
@@ -473,14 +479,22 @@ impl Message<RegisterResult> for ControlRunner {
         self.state
             .update(RegState::Registered(conn.clone()), AuthResponse::Authorized);
 
-        let reader = self
+        let reader = match self
             .with_map_request(true, async |req| {
                 let map_url = self.params.config.server_url.join("machine/map").unwrap();
 
                 send_map_request(req, &map_url, &conn).await
             })
             .await
-            .unwrap();
+        {
+            Ok(reader) => reader,
+            // As for a failed registration: stop (the device's owner retries), don't panic.
+            Err(e) => {
+                tracing::error!(error = %e, "unable to start the map stream");
+                ctx.stop();
+                return;
+            }
+        };
 
         let stream = map_stream(reader).map(Arc::new);
 
@@ -521,8 +535,8 @@ impl Message<StreamMessage<Arc<StateUpdate>, (), ()>> for ControlRunner {
             let _ = handle_ping(&msg, &self.params.config.server_url, conn).await;
         }
 
-        if let Some(dial_plan) = &msg.dial_plan
-            && self
+        if let Some(dial_plan) = &msg.dial_plan {
+            match self
                 .params
                 .env
                 .ask::<DialerActor, _>(
@@ -533,9 +547,12 @@ impl Message<StreamMessage<Arc<StateUpdate>, (), ()>> for ControlRunner {
                     true,
                 )
                 .await
-                .unwrap()
-        {
-            tracing::trace!(new_dial_plan = ?dial_plan);
+            {
+                Ok(true) => tracing::trace!(new_dial_plan = ?dial_plan),
+                Ok(false) => {}
+                // The dialer is gone (shutting down): not worth a panic.
+                Err(e) => tracing::warn!(error = %e, "updating the dial plan"),
+            }
         }
 
         if let Some(node) = msg.node.as_ref() {
